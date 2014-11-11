@@ -17,68 +17,23 @@
 
 package org.apache.spark.hbase
 
-import org.apache.hadoop.hbase.HBaseConfiguration
-import org.apache.spark.rdd.RDD
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
-import java.io.ByteArrayInputStream
-import java.io.DataInputStream
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.hbase.client.HConnectionManager
-import org.apache.spark.api.java.JavaPairRDD
-import java.io.OutputStream
-import org.apache.hadoop.hbase.client.HTable
-import org.apache.hadoop.hbase.client.Scan
-import org.apache.hadoop.hbase.client.Get
-import java.util.ArrayList
-import org.apache.hadoop.hbase.client.Result
-import scala.reflect.ClassTag
-import org.apache.hadoop.hbase.client.HConnection
-import org.apache.hadoop.hbase.client.Put
-import org.apache.hadoop.hbase.client.Increment
-import org.apache.hadoop.hbase.client.Delete
-import org.apache.spark.SparkContext
-import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil
-import org.apache.hadoop.hbase.io.ImmutableBytesWritable
-import org.apache.hadoop.hbase.util.Bytes
-import org.apache.hadoop.mapreduce.Job
-import org.apache.hadoop.hbase.mapred.IdentityTableMap
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil
-import org.apache.hadoop.hbase.util.Base64
-import org.apache.hadoop.hbase.mapreduce.MutationSerialization
-import org.apache.hadoop.hbase.mapreduce.ResultSerialization
-import org.apache.hadoop.hbase.mapreduce.KeyValueSerialization
-import org.apache.spark.rdd.HadoopRDD
-import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.SerializableWritable
-import java.util.HashMap
-import java.util.concurrent.atomic.AtomicInteger
-import org.apache.hadoop.hbase.HConstants
-import java.util.concurrent.atomic.AtomicLong
-import java.util.Timer
-import java.util.TimerTask
-import org.apache.hadoop.hbase.client.Mutation
-import scala.collection.mutable.MutableList
-import org.apache.spark.streaming.dstream.DStream
-import org.apache.hadoop.hbase.HBaseTestingUtility
 import java.io._
-import org.apache.spark.api.java.JavaRDD
-import org.apache.spark.api.java.function.VoidFunction
-import org.apache.spark.api.java.function.Function
-import org.apache.spark.api.java.JavaSparkContext.fakeClassTag
-import org.apache.spark.api.java.function.FlatMapFunction
-import scala.collection.JavaConversions._
-import org.apache.spark.streaming.api.java.JavaDStream
-import org.apache.hadoop.security.Credentials
-import org.apache.hadoop.security.UserGroupInformation
+import java.util.ArrayList
+
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.hbase.client._
+import org.apache.hadoop.hbase.io.ImmutableBytesWritable
+import org.apache.hadoop.hbase.mapreduce.{IdentityTableMapper, TableInputFormat, TableMapReduceUtil}
+import org.apache.hadoop.mapreduce.Job
+import org.apache.hadoop.security.{Credentials, UserGroupInformation}
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod
-import org.apache.hadoop.hbase.protobuf.RequestConverter
-import org.apache.hadoop.mapred.JobConf
-import org.apache.hadoop.hbase.mapreduce.TableInputFormat
-import org.apache.hadoop.hbase.mapreduce.IdentityTableMapper
-import org.apache.spark.hbase.HBaseScanRDD
-import org.apache.spark.hbase.HBaseScanRDD
-import org.apache.spark.hbase.HBaseScanRDD
+import org.apache.spark.{SerializableWritable, SparkContext}
+import org.apache.spark.api.java.JavaSparkContext.fakeClassTag
+import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.rdd.RDD
+import org.apache.spark.streaming.dstream.DStream
+
+import scala.reflect.ClassTag
 
 
 /**
@@ -231,6 +186,36 @@ class HBaseContext(@transient sc: SparkContext,
           htable.close()
         }))
   }
+  
+  /**
+   * Simple Put an object by given HConnection, tableName and transformation func
+   */
+  def Put[T](hConnection: HConnection, tableName: String,  obj: T,  f: (T) => Put, autoFlush: Boolean) {
+     withTable[T](hConnection.getTable(tableName), obj, f, autoFlush)
+  }
+
+  /**
+   * loan pattern to make sure table is closed after use
+   */
+  private def withTable[T](htable: HTableInterface,  obj: T,  f: (T) => Put, autoFlush: Boolean ) : Unit =
+  {
+    try{
+      htable.setAutoFlush(autoFlush, true)
+      htable.put(f(obj))
+      htable.flushCommits()
+    } finally {
+      try {
+        if(htable != null ) {
+          htable.close()
+        }
+      }catch {
+        case _ : Throwable => ??? //ignore for now, todo: add logging
+      }
+    }
+
+  }
+  
+  
   
   /**
    * A simple abstraction over the HBaseContext.streamMapPartition method.
@@ -521,6 +506,41 @@ class HBaseContext(@transient sc: SparkContext,
           it,
           getMapPartition.run), true)(fakeClassTag[U])
   }
+
+
+  /**
+   * Simple Get using HbaseConnection and make transformation of Result into user Type U
+   * @param hConnection
+   * @param tableName
+   * @param key rowKey
+   * @param ConvertResult function to convert Result to U
+   * @return User type U
+   */
+  def Get[U](hConnection: HConnection, tableName: String, key: Array[Byte], ConvertResult: Result => U ) : U = {
+    withTable[U](hConnection.getTable(tableName), key, ConvertResult)
+  }
+
+  /**
+   * loan pattern to make sure table is closed after use
+   */
+  private def withTable[U](htable: HTableInterface,  key: Array[Byte], ConvertResult: Result => U ) : U =
+  {
+    try{
+       val result = htable.get(new Get(key))
+       val u = ConvertResult(result)
+       u
+    } finally {
+      try {
+       if(htable != null ) {
+         htable.close()
+       }
+      }catch {
+        case _ : Throwable => ??? //ignore for now, todo: add logging
+      }
+    }
+
+  }
+
   
   /**
    * A simple abstraction over the HBaseContext.streamMap method.
@@ -627,17 +647,30 @@ class HBaseContext(@transient sc: SparkContext,
     it: Iterator[T],
     f: (Iterator[T], HConnection) => Unit) = {
 
-    val config = configBroadcast.value.value
-    val creds = credentialBroadcast.value.value
-    
+    val hConnection = getConnection(configBroadcast, credentialBroadcast)
+    f(it, hConnection)
+  }
+
+  /**
+   *
+   * @return HBaseConnection based on broadcast credential and configuration
+   */
+  def getConnection() : HConnection =  getConnection(broadcastedConf,credentialsConf)
+
+
+  private def getConnection(configBroadcast: Broadcast[SerializableWritable[Configuration]],
+                            credentialBroadcast: Broadcast[SerializableWritable[Credentials]]) : HConnection =
+  {
+    val config = broadcastedConf.value.value
+    val creds = credentialsConf.value.value
+
     val ugi = UserGroupInformation.getCurrentUser();
     ugi.addCredentials(creds)
-    // specify that this is a proxy user 
-    ugi.setAuthenticationMethod(AuthenticationMethod.PROXY) 
-    
+    // specify that this is a proxy user
+    ugi.setAuthenticationMethod(AuthenticationMethod.PROXY)
+
     val hConnection = HConnectionManager.createConnection(config)
-    f(it, hConnection)
-    hConnection.close()
+    hConnection
   }
 
   /**
@@ -650,20 +683,9 @@ class HBaseContext(@transient sc: SparkContext,
     it: Iterator[K],
     mp: (Iterator[K], HConnection) => Iterator[U]): Iterator[U] = {
 
-    val config = configBroadcast.value.value
-    val creds = credentialBroadcast.value.value
-    
-    val ugi = UserGroupInformation.getCurrentUser();
-    ugi.addCredentials(creds)
-    // specify that this is a proxy user 
-    ugi.setAuthenticationMethod(AuthenticationMethod.PROXY) 
-
-    val hConnection = HConnectionManager.createConnection(config)
-
+    val hConnection = getConnection(configBroadcast, credentialBroadcast)
     val res = mp(it, hConnection)
-    hConnection.close()
     res
-
   }
   
   /**
@@ -697,5 +719,7 @@ class HBaseContext(@transient sc: SparkContext,
       htable.close()
       res.iterator
     }
+
+
   }
 }
