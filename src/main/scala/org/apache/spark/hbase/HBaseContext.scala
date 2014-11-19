@@ -649,6 +649,7 @@ class HBaseContext(@transient sc: SparkContext,
 
     val hConnection = getConnection(configBroadcast, credentialBroadcast)
     f(it, hConnection)
+    hConnection.close()
   }
 
   /**
@@ -685,6 +686,7 @@ class HBaseContext(@transient sc: SparkContext,
 
     val hConnection = getConnection(configBroadcast, credentialBroadcast)
     val res = mp(it, hConnection)
+    hConnection.close()
     res
   }
   
