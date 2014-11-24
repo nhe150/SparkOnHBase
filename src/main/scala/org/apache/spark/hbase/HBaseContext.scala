@@ -186,6 +186,27 @@ class HBaseContext(@transient sc: SparkContext,
           htable.close()
         }))
   }
+
+  /**
+   * Simple Facade method to do bulk put based on dataIterator
+   * @param dataIterator dataIterator
+   * @param tableName table to put data into
+   * @param f   function to transform T to Put
+   * @param autoFlush  autoFlush the table or not
+   */
+  def simpleBulkPut[T](dataIterator: Iterator[T], tableName: String, f: (T) => Put, autoFlush: Boolean ): Unit = {
+    hbaseForeachPartition[T](
+      broadcastedConf,
+      credentialsConf,
+      dataIterator,
+      (iterator, hConnection) => {
+        val htable = hConnection.getTable(tableName)
+        htable.setAutoFlush(autoFlush, true)
+        iterator.foreach(T => htable.put(f(T)))
+        htable.flushCommits()
+        htable.close()
+      })
+  }
   
   /**
    * Simple Put an object by given HConnection, tableName and transformation func
@@ -209,7 +230,7 @@ class HBaseContext(@transient sc: SparkContext,
           htable.close()
         }
       }catch {
-        case _ : Throwable => ??? //ignore for now, todo: add logging
+        case _ : Throwable => () //ignore for now, todo: add logging
       }
     }
 
@@ -507,6 +528,39 @@ class HBaseContext(@transient sc: SparkContext,
           getMapPartition.run), true)(fakeClassTag[U])
   }
 
+  /**
+   * A simple facade abstraction to do bulk Get with data type Iterator[T].
+   *
+   * It allow addition support for a user to take a RDD and generates a
+   * new RDD based on Gets and the results they bring back from HBase
+   *
+   * @param dataIterator     data to iterate over for generator of row key
+   * @param tableName        The name of the table to get from
+   * @param makeGet    function to convert a value in the RDD to a
+   *                   HBase Get
+   * @param convertResult This will convert the HBase Result object to
+   *                   what ever the user wants to put in the resulting
+   *                   RDD
+   * return            new Iterator of Result that is retrieved data from HBase
+   */
+  def bulkGet[T, U](tableName: String,
+                    batchSize: Integer,
+                    dataIterator: Iterator[T],
+                    makeGet: (T) => Get,
+                    convertResult: (Result) => U): Iterator[U] = {
+
+    val getMapPartition = new GetMapPartition(tableName,
+      batchSize,
+      makeGet,
+      convertResult)
+
+    hbaseMapPartition[T, U](
+        broadcastedConf,
+        credentialsConf,
+        dataIterator,
+        getMapPartition.run)
+  }
+
 
   /**
    * Simple Get using HbaseConnection and make transformation of Result into user Type U
@@ -535,7 +589,7 @@ class HBaseContext(@transient sc: SparkContext,
          htable.close()
        }
       }catch {
-        case _ : Throwable => ??? //ignore for now, todo: add logging
+        case _ : Throwable =>   ()  //ignore for now, todo: add logging
       }
     }
 

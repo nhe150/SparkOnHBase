@@ -46,8 +46,8 @@ object HBaseBulkGetExample {
       (Bytes.toBytes("3")),
       (Bytes.toBytes("4")),
       (Bytes.toBytes("5")),
-      (Bytes.toBytes("6")),
-      (Bytes.toBytes("7"))))
+      (Bytes.toBytes("6"))
+    ))
 
     val conf = HBaseConfiguration.create()
     conf.addResource(new Path("/etc/hbase/conf/core-site.xml"))
@@ -59,10 +59,7 @@ object HBaseBulkGetExample {
       tableName,
       2,
       rdd,
-      record => { 
-        System.out.println("making Get" )
-        new Get(record)
-      },
+      (record : Array[Byte]) => new Get(record) ,
       (result: Result) => {
 
         val it = result.list().iterator()
@@ -84,6 +81,41 @@ object HBaseBulkGetExample {
       
     
     getRdd.collect.foreach(v => System.out.println(v))
-    
+
+    //for simple facade use
+
+    println("SimleFacade")
+    val resultIterator = hbaseContext.bulkGet[Array[Byte], String](
+      tableName,
+      2,
+      rdd.collect().iterator,
+      (record : Array[Byte])=> {
+        System.out.println("making Get" )
+        new Get(record)
+      },
+      (result: Result) => {
+
+        val it = result.list().iterator()
+        val b = new StringBuilder
+
+        b.append(Bytes.toString(result.getRow()) + ":")
+
+        while (it.hasNext()) {
+          val kv = it.next()
+          val q = Bytes.toString(kv.getQualifier())
+          if (q.equals("counter")) {
+            b.append("(" + Bytes.toString(kv.getQualifier()) + "," + Bytes.toLong(kv.getValue()) + ")")
+          } else {
+            b.append("(" + Bytes.toString(kv.getQualifier()) + "," + Bytes.toString(kv.getValue()) + ")")
+          }
+        }
+        b.toString
+      })
+
+
+    while (resultIterator.hasNext ) {
+      println(resultIterator.next() )
+    }
+
   }
 }
